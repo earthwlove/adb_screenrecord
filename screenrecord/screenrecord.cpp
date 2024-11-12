@@ -117,9 +117,12 @@ static uint32_t gVideoHeight = 0;
 static uint32_t gBitRate = 20000000;     // 20Mbps
 static uint32_t gTimeLimitSec = kMaxTimeLimitSec;
 static uint32_t gBframes = 0;
-static uint32_t gIFrameInterval = 360;
 static uint32_t gCaptureRate = 60;
 static uint32_t gOperatingRate = 60;
+static uint32_t gIFrameInterval = 360;
+static uint32_t gIntraRefreshPeriod = 60;
+static uint32_t gMaxPTSGap = -1;
+static uint32_t gBufferSize = 0;
 static uint32_t gLatency = 0;
 static uint32_t gPriority = 0;
 static std::optional<PhysicalDisplayId> gPhysicalDisplayId;
@@ -198,9 +201,11 @@ static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
     format->setInt32(KEY_COLOR_FORMAT, OMX_COLOR_FormatAndroidOpaque);
     format->setInt32(KEY_BIT_RATE, gBitRate);
     format->setFloat(KEY_FRAME_RATE, displayFps);
+    format->setFloat(KEY_MAX_FPS_TO_ENCODER, displayFps);
     format->setFloat(KEY_CAPTURE_RATE, gCaptureRate);
     format->setFloat(KEY_OPERATING_RATE, gOperatingRate);
     format->setInt32(KEY_I_FRAME_INTERVAL, gIFrameInterval);
+    format->setInt32(KEY_INTRA_REFRESH_PERIOD, gIntraRefreshPeriod);
     format->setInt32(KEY_MAX_B_FRAMES, gBframes);
     format->setInt32(KEY_PROFILE, AVCProfileHigh);
     format->setInt32(KEY_LEVEL, AVCLevel5);
@@ -211,11 +216,10 @@ static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
     format->setInt32(KEY_VIDEO_QP_I_MAX, 51);
     format->setInt32(KEY_VIDEO_QP_MIN, 34);
     format->setInt32(KEY_VIDEO_QP_MAX, 51); */
-    format->setInt32(KEY_MAX_INPUT_SIZE, 0);
+    format->setInt32(KEY_MAX_INPUT_SIZE, gBufferSize);
     format->setInt32(KEY_BITRATE_MODE, BITRATE_MODE_CBR);
-    format->setInt32(KEY_INTRA_REFRESH_PERIOD, 60);
     format->setInt32(PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
-    format->setInt32(KEY_MAX_PTS_GAP_TO_ENCODER, -1);
+    format->setInt32(KEY_MAX_PTS_GAP_TO_ENCODER, gMaxPTSGap);
 //    format->setInt32(KEY_LEVEL, AVCLevel5);
     if (gBframes > 0) {
         format->setInt32(KEY_PROFILE, AVCProfileMain);
@@ -1274,6 +1278,10 @@ int main(int argc, char* const argv[]) {
         { "output-format",      required_argument,  NULL, 'o' },
         { "codec-name",         required_argument,  NULL, 'N' },
         { "i-frame-interval",   required_argument,  NULL, 'I' },
+        { "intra-refresh",   	required_argument,  NULL, 'R' },
+        { "buffer-size",   	required_argument,  NULL, 'M' },
+        { "max-pts-to-gap",   	required_argument,  NULL, 'g' },
+        { "intra-refresh",   	required_argument,  NULL, 'R' },
         { "capture-rate",       required_argument,  NULL, 'c' },
         { "operating-rate",     required_argument,  NULL, 'O' },
         { "latency",       	required_argument,  NULL, 'l' },
@@ -1388,6 +1396,11 @@ int main(int argc, char* const argv[]) {
 				return 2;
 			}
             break;
+        case 'R':
+			if (parseValueWithUnit(optarg, &gIntraRefreshPeriod) != NO_ERROR) {
+				return 2;
+			}
+            break;
         case 'c':
 			if (parseValueWithUnit(optarg, &gCaptureRate) != NO_ERROR) {
 				return 2;
@@ -1400,6 +1413,16 @@ int main(int argc, char* const argv[]) {
             break;
         case 'l':
 			if (parseValueWithUnit(optarg, &gLatency) != NO_ERROR) {
+				return 2;
+			}
+            break;
+        case 'g':
+			if (parseValueWithUnit(optarg, &gMaxPTSGap) != NO_ERROR) {
+				return 2;
+			}
+            break;
+        case 'M':
+			if (parseValueWithUnit(optarg, &gBufferSize) != NO_ERROR) {
 				return 2;
 			}
             break;
