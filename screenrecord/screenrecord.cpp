@@ -29,13 +29,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+
 #include <termios.h>
+#include <unistd.h>
 
 #define LOG_TAG "ScreenRecord"
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 //#define LOG_NDEBUG 0
 #include <utils/Log.h>
-#include <unistd.h>
+
 #include <binder/IPCThreadState.h>
 #include <utils/Errors.h>
 #include <utils/SystemClock.h>
@@ -64,6 +66,7 @@
 #include "screenrecord.h"
 #include "Overlay.h"
 #include "FrameOutput.h"
+
 using android::ABuffer;
 using android::ALooper;
 using android::AMessage;
@@ -86,6 +89,7 @@ using android::Vector;
 using android::sp;
 using android::status_t;
 using android::SurfaceControl;
+
 using android::INVALID_OPERATION;
 using android::NAME_NOT_FOUND;
 using android::NO_ERROR;
@@ -100,31 +104,35 @@ static const uint32_t kFallbackWidth = 1280;        // 720p
 static const uint32_t kFallbackHeight = 720;
 static const char* kMimeTypeAvc = "video/avc";
 static const char* kMimeTypeApplicationOctetstream = "application/octet-stream";
+
 // Command-line parameters.
 static bool gVerbose = false;           // chatty on stdout
 static bool gRotate = false;            // rotate 90 degrees
 static bool gMonotonicTime = false;     // use system monotonic time for timestamps
 static bool gPersistentSurface = false; // use persistent surface
 static enum {
-    FORMAT_MP4, FORMAT_H264, FORMAT_HEVC, FORMAT_WEBM, FORMAT_3GPP, FORMAT_FRAMES, FORMAT_RAW_FRAMES
+    FORMAT_MP4, FORMAT_H264, FORMAT_WEBM, FORMAT_3GPP, FORMAT_FRAMES, FORMAT_RAW_FRAMES
 } gOutputFormat = FORMAT_MP4;           // data format for output
-static AString gCodecName = "OMX.qcom.video.encoder.avc";         // codec name override
+static AString gCodecName = "";         // codec name override
 static bool gSizeSpecified = false;     // was size explicitly requested?
 static bool gWantInfoScreen = false;    // do we want initial info screen?
 static bool gWantFrameTime = false;     // do we want times on each frame?
+//static bool gSecureDisplay = false;     // should we create a secure virtual display?
 static uint32_t gVideoWidth = 0;        // default width+height
 static uint32_t gVideoHeight = 0;
 static uint32_t gBitRate = 20000000;     // 20Mbps
 static uint32_t gTimeLimitSec = kMaxTimeLimitSec;
 static uint32_t gBframes = 0;
-static uint32_t gCaptureRate = 60;
-static uint32_t gOperatingRate = 60;
+static uint32_t gCaptureRate = 60.0;
+static uint32_t gOperatingRate = 60.0;
 static uint32_t gIFrameInterval = 360;
 static uint32_t gIntraRefreshPeriod = 60;
 static uint32_t gMaxPTSGap = -1;
 static uint32_t gBufferSize = 0;
 static uint32_t gLatency = 0;
 static uint32_t gPriority = 0;
+static uint32_t gRequestSyncFrame = 0;
+
 static std::optional<PhysicalDisplayId> gPhysicalDisplayId;
 // Set by signal handler to stop recording.
 static volatile bool gStopRequested = false;
@@ -185,15 +193,16 @@ static status_t configureSignals() {
  * Configures and starts the MediaCodec encoder.  Obtains an input surface
  * from the codec.
  */
-//static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
 static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
         sp<IGraphicBufferProducer>* pBufferProducer) {
     status_t err;
+
     if (gVerbose) {
         printf("Configuring recorder for %dx%d %s at %.2fMbps\n",
                 gVideoWidth, gVideoHeight, kMimeTypeAvc, gBitRate / 1000000.0);
-        fflush(stdout);
+        //fflush(stdout);
     }
+
     sp<AMessage> format = new AMessage;
     format->setInt32(KEY_WIDTH, gVideoWidth);
     format->setInt32(KEY_HEIGHT, gVideoHeight);
@@ -202,13 +211,21 @@ static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
     format->setInt32(KEY_BIT_RATE, gBitRate);
     format->setFloat(KEY_FRAME_RATE, displayFps);
     format->setFloat(KEY_MAX_FPS_TO_ENCODER, displayFps);
-    format->setFloat(KEY_CAPTURE_RATE, gCaptureRate);
-    format->setFloat(KEY_OPERATING_RATE, gOperatingRate);
+    if (gCaptureRate != 100.0) {
+    	format->setFloat(KEY_CAPTURE_RATE, displayFps);
+    } else {
+	format->setFloat(KEY_CAPTURE_RATE, gCaptureRate);
+    }
+    if (gOperatingRate != 100.0) {
+    	format->setFloat(KEY_OPERATING_RATE, displayFps);
+    } else {
+	format->setFloat(KEY_OPERATING_RATE, gOperatingRate);
+    }
     format->setInt32(KEY_I_FRAME_INTERVAL, gIFrameInterval);
     format->setInt32(KEY_INTRA_REFRESH_PERIOD, gIntraRefreshPeriod);
     format->setInt32(KEY_MAX_B_FRAMES, gBframes);
-    format->setInt32(KEY_PROFILE, AVCProfileHigh);
-    format->setInt32(KEY_LEVEL, AVCLevel5);
+    format->setInt32(KEY_PROFILE, AVCProfileBaseline);
+    format->setInt32(KEY_LEVEL, AVCLevel1);
     format->setInt32(KEY_LATENCY, gLatency);
     format->setInt32(KEY_PRIORITY, gPriority);
     format->setInt32(KEY_ALLOW_FRAME_DROP, 0);
@@ -218,7 +235,7 @@ static status_t prepareEncoder(float displayFps, sp<MediaCodec>* pCodec,
     format->setInt32(KEY_VIDEO_QP_MAX, 51); */
     format->setInt32(KEY_MAX_INPUT_SIZE, gBufferSize);
     format->setInt32(KEY_BITRATE_MODE, BITRATE_MODE_CBR);
-    format->setInt32(PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+    format->setInt32(PARAMETER_KEY_REQUEST_SYNC_FRAME, gRequestSyncFrame);
     format->setInt32(KEY_MAX_PTS_GAP_TO_ENCODER, gMaxPTSGap);
 //    format->setInt32(KEY_LEVEL, AVCLevel5);
     if (gBframes > 0) {
@@ -341,11 +358,11 @@ static status_t setDisplayProjection(
         if (gRotate) {
             printf("Rotated content area is %ux%u at offset x=%d y=%d\n",
                     outHeight, outWidth, offY, offX);
-            fflush(stdout);
+            //fflush(stdout);
         } else {
             printf("Content area is %ux%u at offset x=%d y=%d\n",
                     outWidth, outHeight, offX, offY);
-            fflush(stdout);
+            //fflush(stdout);
         }
     }
 
@@ -381,8 +398,8 @@ static status_t prepareVirtualDisplay(
         const ui::DisplayState& displayState,
         const sp<IGraphicBufferProducer>& bufferProducer,
         sp<IBinder>* pDisplayHandle, sp<SurfaceControl>* mirrorRoot) {
-    sp<IBinder> dpy = SurfaceComposerClient::createDisplay(
-            String8("ScreenRecorder"), false /*secure*/);
+    static const std::string kDisplayName("ScreenRecorder");
+    sp<IBinder> dpy = SurfaceComposerClient::createDisplay(String8("ScreenRecorder"), false);
     SurfaceComposerClient::Transaction t;
     t.setDisplaySurface(dpy, bufferProducer);
     setDisplayProjection(t, dpy, displayState);
@@ -452,13 +469,11 @@ static status_t writeWinscopeMetadataLegacy(const Vector<int64_t>& timestamps,
     }
     AMediaCodecBufferInfo bufferInfo = {
         0 /* offset */,
-//e        static_cast<int32_t>(buffer->size()),
-        static_cast<int32_t>(0),
+        static_cast<int32_t>(buffer->size()),
         timestamps[0] /* presentationTimeUs */,
         0 /* flags */
     };
-//e    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, buffer->data(), &bufferInfo);
-    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, 0, &bufferInfo);
+    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, buffer->data(), &bufferInfo);
 }
 
 /*
@@ -523,13 +538,11 @@ static status_t writeWinscopeMetadata(const Vector<std::int64_t>& timestampsMono
 
     AMediaCodecBufferInfo bufferInfo = {
         0 /* offset */,
-//e        static_cast<std::int32_t>(buffer->size()),
-        static_cast<std::int32_t>(0),
+        static_cast<std::int32_t>(buffer->size()),
         timestampsMonotonicUs[0] /* presentationTimeUs */,
         0 /* flags */
     };
-//e    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, buffer->data(), &bufferInfo);
-    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, 0, &bufferInfo);
+    return AMediaMuxer_writeSampleData(muxer, metaTrackIdx, buffer->data(), &bufferInfo);
 }
 
 /*
@@ -580,7 +593,7 @@ void updateDisplayProjection(const sp<IBinder>& virtualDpy, ui::DisplayState& di
  */
 static status_t runEncoder(const sp<MediaCodec>& encoder, AMediaMuxer* muxer, FILE* rawFp,
                            const sp<IBinder>& virtualDpy, ui::DisplayState displayState) {
-    static int kTimeout = 100001;   // be responsive on signal
+    static int kTimeout = 250000;   // be responsive on signal
     status_t err;
     ssize_t trackIdx = -1;
     ssize_t metaLegacyTrackIdx = -1;
@@ -614,7 +627,7 @@ static status_t runEncoder(const sp<MediaCodec>& encoder, AMediaMuxer* muxer, FI
         if (systemTime(CLOCK_MONOTONIC) > endWhenNsec) {
             if (gVerbose) {
                 printf("Time limit reached\n");
-                fflush(stdout);
+                //fflush(stdout);
             }
             break;
         }
@@ -649,13 +662,12 @@ static status_t runEncoder(const sp<MediaCodec>& encoder, AMediaMuxer* muxer, FI
                 }
 
                 if (muxer == NULL) {
-//e                    fwrite(buffers[bufIndex]->data(), 1, size, rawFp);
                     fwrite(buffers[bufIndex]->data(), 1, size, rawFp);
                     // Flush the data immediately in case we're streaming.
                     // We don't want to do this if all we've written is
                     // the SPS/PPS data because mplayer gets confused.
                     if ((flags & MediaCodec::BUFFER_FLAG_CODECCONFIG) == 0) {
-                        fflush(rawFp);
+                       // fflush(rawFp);
                     }
                 } else {
                     // The MediaMuxer docs are unclear, but it appears that we
@@ -671,13 +683,11 @@ static status_t runEncoder(const sp<MediaCodec>& encoder, AMediaMuxer* muxer, FI
                             buffers[bufIndex]->data(), buffers[bufIndex]->size());
                     AMediaCodecBufferInfo bufferInfo = {
                         0 /* offset */,
-//e                        static_cast<int32_t>(buffer->size()),
-                        static_cast<int32_t>(0),
+                        static_cast<int32_t>(buffer->size()),
                         ptsUsec /* presentationTimeUs */,
                         flags
                     };
-//e                    err = AMediaMuxer_writeSampleData(muxer, trackIdx, buffer->data(), &bufferInfo);
-                    err = AMediaMuxer_writeSampleData(muxer, trackIdx, 0, &bufferInfo);
+                    err = AMediaMuxer_writeSampleData(muxer, trackIdx, buffer->data(), &bufferInfo);
                     if (err != NO_ERROR) {
                         fprintf(stderr,
                             "Failed writing data to muxer (err=%d)\n", err);
@@ -755,7 +765,7 @@ static status_t runEncoder(const sp<MediaCodec>& encoder, AMediaMuxer* muxer, FI
         printf("Encoder stopping; recorded %u frames in %" PRId64 " seconds\n",
                 debugNumFrames, nanoseconds_to_seconds(
                         systemTime(CLOCK_MONOTONIC) - startWhenNsec));
-        fflush(stdout);
+        //fflush(stdout);
     }
     if (metaLegacyTrackIdx >= 0 && metaTrackIdx >= 0 && !timestampsMonotonicUs.isEmpty()) {
         err = writeWinscopeMetadataLegacy(timestampsMonotonicUs, metaLegacyTrackIdx, muxer);
@@ -922,7 +932,7 @@ static status_t recordScreen(const char* fileName) {
                layerStackSpaceRect.getWidth(), layerStackSpaceRect.getHeight(),
                displayMode.peakRefreshRate, toCString(displayState.orientation),
                displayState.layerStack.id);
-        fflush(stdout);
+        //fflush(stdout);
     }
 
     // Encoder can't take odd number as config
@@ -938,7 +948,7 @@ static status_t recordScreen(const char* fileName) {
     sp<FrameOutput> frameOutput;
     sp<IGraphicBufferProducer> encoderInputSurface;
     if (gOutputFormat != FORMAT_FRAMES && gOutputFormat != FORMAT_RAW_FRAMES) {
-       err = prepareEncoder(displayMode.peakRefreshRate, &recordingData.encoder,
+        err = prepareEncoder(displayMode.peakRefreshRate, &recordingData.encoder,
                              &encoderInputSurface);
 
         if (err != NO_ERROR && !gSizeSpecified) {
@@ -952,7 +962,7 @@ static status_t recordScreen(const char* fileName) {
                         gVideoWidth, gVideoHeight, newWidth, newHeight);
                 gVideoWidth = newWidth;
                 gVideoHeight = newHeight;
-             err = prepareEncoder(displayMode.peakRefreshRate, &recordingData.encoder,
+                err = prepareEncoder(displayMode.peakRefreshRate, &recordingData.encoder,
                                      &encoderInputSurface);
             }
         }
@@ -965,7 +975,7 @@ static status_t recordScreen(const char* fileName) {
         // We're not using an encoder at all.  The "encoder input surface" we hand to
         // SurfaceFlinger will just feed directly to us.
         frameOutput = new FrameOutput();
-        err = frameOutput->createInputSurface(gVideoWidth/20, gVideoHeight/20, &encoderInputSurface);
+        err = frameOutput->createInputSurface(gVideoWidth, gVideoHeight, &encoderInputSurface);
         if (err != NO_ERROR) {
             return err;
         }
@@ -989,7 +999,7 @@ static status_t recordScreen(const char* fileName) {
         }
         if (gVerbose) {
             printf("Bugreport overlay created\n");
-            fflush(stdout);
+            //fflush(stdout);
         }
     } else {
         // Use the encoder's input surface as the virtual display surface.
@@ -1038,7 +1048,6 @@ static status_t recordScreen(const char* fileName) {
             break;
         }
         case FORMAT_H264:
-        case FORMAT_HEVC:
         case FORMAT_FRAMES:
         case FORMAT_RAW_FRAMES: {
             rawFp = prepareRawOutput(fileName);
@@ -1073,7 +1082,7 @@ static status_t recordScreen(const char* fileName) {
             // works because wait() wakes when a signal hits, but we
             // need to handle the edge cases.)
             bool rawFrames = gOutputFormat == FORMAT_RAW_FRAMES;
-            err = frameOutput->copyFrame(rawFp, 100001, rawFrames);
+            err = frameOutput->copyFrame(rawFp, 250000, rawFrames);
             if (err == ETIMEDOUT) {
                 err = NO_ERROR;
             } else if (err != NO_ERROR) {
@@ -1091,7 +1100,7 @@ static status_t recordScreen(const char* fileName) {
 
         if (gVerbose) {
             printf("Stopping encoder and muxer\n");
-            fflush(stdout);
+            //fflush(stdout);
         }
     }
 
@@ -1113,7 +1122,7 @@ static status_t recordScreen(const char* fileName) {
  *
  * This is optional, but nice to have.
  */
-/*static status_t notifyMediaScanner(const char* fileName) {
+static status_t notifyMediaScanner(const char* fileName) {
     // need to do allocations before the fork()
     String8 fileUrl("file://");
     fileUrl.append(fileName);
@@ -1134,7 +1143,7 @@ static status_t recordScreen(const char* fileName) {
             printf(" %s", argv[i]);
         }
         putchar('\n');
-        fflush(stdout);
+        //fflush(stdout);
     }
 
     pid_t pid = fork();
@@ -1171,7 +1180,7 @@ static status_t recordScreen(const char* fileName) {
     }
     return NO_ERROR;
 }
-*/
+
 /*
  * Parses a string of the form "1280x720".
  *
@@ -1278,14 +1287,15 @@ int main(int argc, char* const argv[]) {
         { "output-format",      required_argument,  NULL, 'o' },
         { "codec-name",         required_argument,  NULL, 'N' },
         { "i-frame-interval",   required_argument,  NULL, 'I' },
-        { "intra-refresh",   	required_argument,  NULL, 'R' },
-        { "buffer-size",   	required_argument,  NULL, 'M' },
-        { "max-pts-to-gap",   	required_argument,  NULL, 'g' },
-        { "intra-refresh",   	required_argument,  NULL, 'R' },
+        { "intra-refresh",      required_argument,  NULL, 'R' },
+        { "buffer-size",        required_argument,  NULL, 'M' },
+        { "max-pts-to-gap",     required_argument,  NULL, 'g' },
+        { "intra-refresh",      required_argument,  NULL, 'R' },
         { "capture-rate",       required_argument,  NULL, 'c' },
         { "operating-rate",     required_argument,  NULL, 'O' },
-        { "latency",       	required_argument,  NULL, 'l' },
-        { "priority",       	required_argument,  NULL, 'P' },
+        { "latency",            required_argument,  NULL, 'l' },
+        { "priority",           required_argument,  NULL, 'P' },
+        { "request-sync",       required_argument,  NULL, 'F' },
         { "monotonic-time",     no_argument,        NULL, 'm' },
         { "persistent-surface", no_argument,        NULL, 'p' },
         { "bframes",            required_argument,  NULL, 'B' },
@@ -1350,7 +1360,7 @@ int main(int argc, char* const argv[]) {
                     std::numeric_limits<uint32_t>::max() : timeLimitSec;
             if (gVerbose) {
                 printf("Time limit set to %u seconds\n", gTimeLimitSec);
-                fflush(stdout);
+                //fflush(stdout);
             }
             break;
         }
@@ -1373,8 +1383,6 @@ int main(int argc, char* const argv[]) {
                 gOutputFormat = FORMAT_MP4;
             } else if (strcmp(optarg, "h264") == 0) {
                 gOutputFormat = FORMAT_H264;
-            } else if (strcmp(optarg, "HEVC") == 0) {
-                gOutputFormat = FORMAT_HEVC;
             } else if (strcmp(optarg, "webm") == 0) {
                 gOutputFormat = FORMAT_WEBM;
             } else if (strcmp(optarg, "3gpp") == 0) {
@@ -1391,46 +1399,6 @@ int main(int argc, char* const argv[]) {
         case 'N':
             gCodecName = optarg;
             break;
-        case 'I':
-			if (parseValueWithUnit(optarg, &gIFrameInterval) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'R':
-			if (parseValueWithUnit(optarg, &gIntraRefreshPeriod) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'c':
-			if (parseValueWithUnit(optarg, &gCaptureRate) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'O':
-			if (parseValueWithUnit(optarg, &gOperatingRate) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'l':
-			if (parseValueWithUnit(optarg, &gLatency) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'g':
-			if (parseValueWithUnit(optarg, &gMaxPTSGap) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'M':
-			if (parseValueWithUnit(optarg, &gBufferSize) != NO_ERROR) {
-				return 2;
-			}
-            break;
-        case 'P':
-			if (parseValueWithUnit(optarg, &gPriority) != NO_ERROR) {
-				return 2;
-			}
-            break;
         case 'm':
             gMonotonicTime = true;
             break;
@@ -1442,6 +1410,46 @@ int main(int argc, char* const argv[]) {
                 return 2;
             }
             break;
+       case 'I':
+                        if (parseValueWithUnit(optarg, &gIFrameInterval) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+       case 'F':
+                        if (parseValueWithUnit(optarg, &gRequestSyncFrame) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'R':
+                        if (parseValueWithUnit(optarg, &gIntraRefreshPeriod) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'c':
+                        if (parseValueWithUnit(optarg, &gCaptureRate) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'O':
+                        if (parseValueWithUnit(optarg, &gOperatingRate) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'l':
+                        if (parseValueWithUnit(optarg, &gLatency) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'g':
+                        if (parseValueWithUnit(optarg, &gMaxPTSGap) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
+        case 'M':
+                        if (parseValueWithUnit(optarg, &gBufferSize) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
         case 'd':
             if (const auto id = android::DisplayId::fromValue<PhysicalDisplayId>(atoll(optarg));
                 id && SurfaceComposerClient::getPhysicalDisplayToken(*id)) {
@@ -1451,6 +1459,11 @@ int main(int argc, char* const argv[]) {
 
             fprintf(stderr, "Invalid physical display ID\n");
             return 2;
+        case 'P':
+                        if (parseValueWithUnit(optarg, &gPriority) != NO_ERROR) {
+                                return 2;
+                        }
+            break;
         default:
             if (ic != '?') {
                 fprintf(stderr, "getopt_long returned unexpected value 0x%x\n", ic);
@@ -1479,10 +1492,10 @@ int main(int argc, char* const argv[]) {
     }
 
     status_t err = recordScreen(fileName);
-/*    if (err == NO_ERROR) {
+    if (err == NO_ERROR) {
         // Try to notify the media scanner.  Not fatal if this fails.
         notifyMediaScanner(fileName);
-    }*/
+    }
     ALOGD(err == NO_ERROR ? "success" : "failed");
     return (int) err;
 }

@@ -344,7 +344,7 @@ void Overlay::onFrameAvailable(const BufferItem& /* item */) {
     //
     // This is a clumsy way to do it, but we're only doing it for one frame,
     // and it's easier than actually drawing lines.
-/*e    const int lineWidth = 4;
+    const int lineWidth = 4;
     glEnable(GL_SCISSOR_TEST);
     glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
     glScissor(0, 0, width, lineWidth);
@@ -356,7 +356,7 @@ void Overlay::onFrameAvailable(const BufferItem& /* item */) {
     glScissor(width - lineWidth, 0, lineWidth, height);
     glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_SCISSOR_TEST);
-*/
+
     //glEnable(GL_BLEND);
     //glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     textRenderer.setProportionalScale(30);

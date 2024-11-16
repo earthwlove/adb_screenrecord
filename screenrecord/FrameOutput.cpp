@@ -55,11 +55,11 @@ status_t FrameOutput::createInputSurface(int width, int height,
     glDisable(GL_CULL_FACE);
 
     // Shader for rendering the external texture.
-/*    err = mExtTexProgram.setup(Program::PROGRAM_EXTERNAL_TEXTURE);
+    err = mExtTexProgram.setup(Program::PROGRAM_EXTERNAL_TEXTURE);
     if (err != NO_ERROR) {
         return err;
     }
-*/
+
     // Input side (buffers from virtual display).
     glGenTextures(1, &mExtTextureName);
     if (mExtTextureName == 0) {
@@ -173,7 +173,7 @@ status_t FrameOutput::copyFrame(FILE* fp, long timeoutUsec, bool rawFrames) {
     if (kShowTiming) {
         startWhenNsec = systemTime(CLOCK_MONOTONIC);
     }
-    fwrite(mPixelBuf, 1, rgbDataLen/2, fp);
+    fwrite(mPixelBuf, 1, rgbDataLen, fp);
     fflush(fp);
     if (kShowTiming) {
         endWhenNsec = systemTime(CLOCK_MONOTONIC);
